@@ -1,0 +1,138 @@
+name: Try to Create OCI A1 VM
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      ocpus:
+        description: "A1.Flex OCPUs"
+        required: true
+        default: "4"
+      memory_gbs:
+        description: "A1.Flex memory in GB"
+        required: true
+        default: "24"
+      boot_volume_gbs:
+        description: "Boot volume size in GB"
+        required: true
+        default: "50"
+      display_name:
+        description: "Instance display name"
+        required: true
+        default: "oci-free-a1"
+
+concurrency:
+  group: oci-a1-create-vm
+  cancel-in-progress: false
+
+env:
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+  OCI_AD_NAME: ${{ secrets.OCI_AD_NAME }}
+  OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+  INSTANCE_DISPLAY_NAME: ${{ github.event.inputs.display_name || 'oci-free-a1' }}
+  OCPUS: ${{ github.event.inputs.ocpus || '4' }}
+  MEMORY_GBS: ${{ github.event.inputs.memory_gbs || '24' }}
+  BOOT_VOLUME_GBS: ${{ github.event.inputs.boot_volume_gbs || '50' }}
+
+jobs:
+  create-vm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache OCI CLI install
+        uses: actions/cache@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-oci-cli-v2
+
+      - name: Add user bin to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OCI CLI
+        run: |
+          python -m pip install --upgrade pip
+          pip install --user oci-cli
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p "$HOME/.oci"
+          printf '%s\n' "${{ secrets.OCI_CLI_KEY_CONTENT }}" > "$HOME/.oci/oci_api_key.pem"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
+
+          cat > "$HOME/.oci/config" <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_CLI_USER }}
+          tenancy=${{ secrets.OCI_CLI_TENANCY }}
+          fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}
+          key_file=$HOME/.oci/oci_api_key.pem
+          region=${{ secrets.OCI_CLI_REGION }}
+          EOF
+
+          printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" > "$HOME/ssh_public_key.pub"
+
+      - name: Try to create VM
+        id: create_vm
+        shell: bash
+        run: |
+          set -o pipefail
+
+          EXISTING_INSTANCE=$(oci compute instance list \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --display-name "$INSTANCE_DISPLAY_NAME" \
+            --lifecycle-state RUNNING \
+            --query 'data[0].id' \
+            --raw-output 2>/dev/null || true)
+
+          if [ -n "$EXISTING_INSTANCE" ] && [ "$EXISTING_INSTANCE" != "null" ]; then
+            OCI_OUTPUT="Instance already running: $EXISTING_INSTANCE"
+            RESULT="already-running"
+          else
+            OCI_OUTPUT=$(oci compute instance launch \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --availability-domain "$OCI_AD_NAME" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config "{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GBS}}" \
+              --subnet-id "$OCI_SUBNET_ID" \
+              --image-id "$OCI_IMAGE_ID" \
+              --ssh-authorized-keys-file "$HOME/ssh_public_key.pub" \
+              --assign-public-ip true \
+              --display-name "$INSTANCE_DISPLAY_NAME" \
+              --boot-volume-size-in-gbs "$BOOT_VOLUME_GBS" 2>&1 || true)
+
+            if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+              RESULT="created"
+            elif echo "$OCI_OUTPUT" | grep -q 'Out of host capacity'; then
+              RESULT="capacity"
+            else
+              RESULT="error"
+            fi
+          fi
+
+          {
+            echo "result=$RESULT"
+            echo "log_data<<EOF"
+            echo "$OCI_OUTPUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          case "$RESULT" in
+            created|capacity|already-running) exit 0 ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Send Discord notification
+        if: always() && env.DISCORD_WEBHOOK_URL != ''
+        uses: sarisia/actions-status-discord@v1.15.4
+        with:
+          webhook: ${{ env.DISCORD_WEBHOOK_URL }}
+          color: ${{ steps.create_vm.outputs.result == 'created' && '0x28a745' || steps.create_vm.outputs.result == 'capacity' && '0xffa500' || '0xdc3545' }}
+          title: OCI A1 VM Bot
+          description: |
+            Result: `${{ steps.create_vm.outputs.result }}`
+
+            ```text
+            ${{ steps.create_vm.outputs.log_data }}
+            ```
