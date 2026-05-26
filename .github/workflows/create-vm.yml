@@ -27,6 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
   OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
   OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
   OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
@@ -70,6 +71,7 @@ jobs:
           key_file=$HOME/.oci/oci_api_key.pem
           region=${{ secrets.OCI_CLI_REGION }}
           EOF
+          chmod 600 "$HOME/.oci/config"
 
           printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" > "$HOME/ssh_public_key.pub"
 
@@ -137,6 +139,8 @@ jobs:
               RESULT="created"
             elif echo "$OCI_OUTPUT" | grep -q 'Out of host capacity'; then
               RESULT="capacity"
+            elif echo "$OCI_OUTPUT" | grep -qiE 'RequestException|timed out|timeout'; then
+              RESULT="retry"
             else
               RESULT="error"
             fi
@@ -153,7 +157,7 @@ jobs:
           echo "$OCI_OUTPUT"
 
           case "$RESULT" in
-            created|capacity|already-running) exit 0 ;;
+            created|capacity|retry|already-running) exit 0 ;;
             *) exit 1 ;;
           esac
 
