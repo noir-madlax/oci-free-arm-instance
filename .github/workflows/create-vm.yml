@@ -79,6 +79,37 @@ jobs:
         run: |
           set -o pipefail
 
+          if [ -z "$OCI_AD_NAME" ]; then
+            OCI_AD_NAME=$(oci iam availability-domain list \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --query 'data[0].name' \
+              --raw-output)
+          fi
+
+          if [ -z "$OCI_SUBNET_ID" ]; then
+            VCN_ID=$(oci network vcn list \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --query 'data[0].id' \
+              --raw-output)
+
+            OCI_SUBNET_ID=$(oci network subnet list \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --vcn-id "$VCN_ID" \
+              | jq -r '.data[] | select(."prohibit-public-ip-on-vnic" == false) | .id' \
+              | head -n 1)
+          fi
+
+          if [ -z "$OCI_IMAGE_ID" ]; then
+            OCI_IMAGE_ID=$(oci compute image list \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --operating-system "Oracle Linux" \
+              --shape "VM.Standard.A1.Flex" \
+              --sort-by TIMECREATED \
+              --sort-order DESC \
+              --query 'data[0].id' \
+              --raw-output)
+          fi
+
           EXISTING_INSTANCE=$(oci compute instance list \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --display-name "$INSTANCE_DISPLAY_NAME" \
