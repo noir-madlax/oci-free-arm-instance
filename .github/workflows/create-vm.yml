@@ -113,9 +113,9 @@ jobs:
           EXISTING_INSTANCE=$(oci compute instance list \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --display-name "$INSTANCE_DISPLAY_NAME" \
-            --lifecycle-state RUNNING \
-            --query 'data[0].id' \
-            --raw-output 2>/dev/null || true)
+            --all 2>/dev/null \
+            | jq -r '.data[] | select(."lifecycle-state" != "TERMINATING" and ."lifecycle-state" != "TERMINATED") | .id' \
+            | head -n 1 || true)
 
           if [ -n "$EXISTING_INSTANCE" ] && [ "$EXISTING_INSTANCE" != "null" ]; then
             OCI_OUTPUT="Instance already running: $EXISTING_INSTANCE"
@@ -148,6 +148,9 @@ jobs:
             echo "$OCI_OUTPUT"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+          echo "Result: $RESULT"
+          echo "$OCI_OUTPUT"
 
           case "$RESULT" in
             created|capacity|already-running) exit 0 ;;
