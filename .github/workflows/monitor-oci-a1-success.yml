@@ -1,0 +1,107 @@
+name: Monitor OCI A1 Creation Success
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore notification state
+        uses: actions/cache@v4
+        with:
+          path: .github/oci-monitor-state
+          key: oci-a1-success-notify-state-v1
+
+      - name: Check latest OCI creation result
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .github/oci-monitor-state
+          STATE_FILE=".github/oci-monitor-state/last_notified_run_id"
+          PREV_REPORTED=""
+          if [ -f "$STATE_FILE" ]; then
+            PREV_REPORTED="$(cat "$STATE_FILE")"
+          fi
+
+          LATEST_RUN_JSON=$(gh run list \
+            --repo "$TARGET_REPO" \
+            --workflow "Try to Create OCI A1 VM" \
+            --status completed \
+            --limit 1 \
+            --json databaseId,createdAt,status,conclusion,url \
+            --jq '.[0]' 2>/dev/null)
+          LATEST_RUN_ID=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.databaseId // empty')
+          LATEST_RUN_URL=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.url // empty')
+          LATEST_RUN_CREATED=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.createdAt // empty')
+          if [ -z "$LATEST_RUN_ID" ] || [ "$LATEST_RUN_ID" = "null" ]; then
+            echo "No completed run found for workflow."
+            echo "should_notify=false" >> "$GITHUB_OUTPUT"
+            echo "run_id=unknown" >> "$GITHUB_OUTPUT"
+            echo "result=unknown" >> "$GITHUB_OUTPUT"
+            echo "created_at=unknown" >> "$GITHUB_OUTPUT"
+            echo "url=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RAW_RESULT=$(gh run view --repo "$TARGET_REPO" "$LATEST_RUN_ID" --log \
+            | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' \
+            | awk '/Result:/{line=$0} END{print line}' \
+            | sed -E 's/.*Result:[[:space:]]*//')
+
+          RESULT=$(printf '%s' "$RAW_RESULT" | tr -d '\r' | tr -d '\n')
+          if [ -z "$RESULT" ]; then
+            RESULT="unknown"
+          fi
+
+          SHOULD_NOTIFY="false"
+          if [ "$RESULT" = "created" ] || [ "$RESULT" = "already-running" ]; then
+            if [ "$LATEST_RUN_ID" != "$PREV_REPORTED" ]; then
+              SHOULD_NOTIFY="true"
+              echo "$LATEST_RUN_ID" > "$STATE_FILE"
+            fi
+          fi
+
+          SHOULD_NOTIFY="${SHOULD_NOTIFY:-false}"
+
+          echo "should_notify=$SHOULD_NOTIFY" >> "$GITHUB_OUTPUT"
+          echo "run_id=$LATEST_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+          echo "created_at=$LATEST_RUN_CREATED" >> "$GITHUB_OUTPUT"
+          echo "url=$LATEST_RUN_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Feishu (10 times)
+        if: steps.check.outputs.should_notify == 'true'
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+
+          WEBHOOK_URL="$FEISHU_WEBHOOK_URL"
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "FEISHU_WEBHOOK_URL is empty; skipping notification."
+            exit 0
+          fi
+
+          TEXT="OCI A1 VM 创建成功（创建流程）\nrun_id=${{ steps.check.outputs.run_id }}\ncreated_at=${{ steps.check.outputs.created_at }}\nresult=${{ steps.check.outputs.result }}\nlink=${{ steps.check.outputs.url }}"
+          for i in {1..10}; do
+            payload=$(jq -nc --arg text "$TEXT" '{msg_type: "text", content: {text: $text}}')
+            curl -fsS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL"
+          done
+
+      - name: Save notification state
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: .github/oci-monitor-state
+          key: oci-a1-success-notify-state-v1

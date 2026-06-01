@@ -33,6 +33,7 @@ env:
   OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
   OCI_AD_NAME: ${{ secrets.OCI_AD_NAME }}
   OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+  OCI_MAX_INSTANCES: ${{ secrets.OCI_MAX_INSTANCES || '1' }}
   DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
   INSTANCE_DISPLAY_NAME: ${{ github.event.inputs.display_name || 'oci-free-a1' }}
   OCPUS: ${{ github.event.inputs.ocpus || '4' }}
@@ -79,29 +80,44 @@ jobs:
         id: create_vm
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
 
-          if [ -z "$OCI_AD_NAME" ]; then
-            OCI_AD_NAME=$(oci iam availability-domain list \
+          OCI_MAX_INSTANCES="${OCI_MAX_INSTANCES:-1}"
+
+          resolve_ad_candidates() {
+            if [ -n "${OCI_AD_NAME:-}" ]; then
+              printf '%s\n' "$OCI_AD_NAME"
+              return
+            fi
+
+            oci iam availability-domain list \
               --compartment-id "$OCI_COMPARTMENT_ID" \
-              --query 'data[0].name' \
-              --raw-output)
-          fi
+              --query 'data[].name' \
+              --raw-output
+          }
 
-          if [ -z "$OCI_SUBNET_ID" ]; then
-            VCN_ID=$(oci network vcn list \
+          resolve_subnet() {
+            if [ -n "${OCI_SUBNET_ID:-}" ]; then
+              return
+            fi
+
+            vcn_id=$(oci network vcn list \
               --compartment-id "$OCI_COMPARTMENT_ID" \
               --query 'data[0].id' \
               --raw-output)
 
             OCI_SUBNET_ID=$(oci network subnet list \
               --compartment-id "$OCI_COMPARTMENT_ID" \
-              --vcn-id "$VCN_ID" \
+              --vcn-id "$vcn_id" \
               | jq -r '.data[] | select(."prohibit-public-ip-on-vnic" == false) | .id' \
               | head -n 1)
-          fi
+          }
 
-          if [ -z "$OCI_IMAGE_ID" ]; then
+          resolve_image() {
+            if [ -n "${OCI_IMAGE_ID:-}" ]; then
+              return
+            fi
+
             OCI_IMAGE_ID=$(oci compute image list \
               --compartment-id "$OCI_COMPARTMENT_ID" \
               --operating-system "Oracle Linux" \
@@ -110,44 +126,144 @@ jobs:
               --sort-order DESC \
               --query 'data[0].id' \
               --raw-output)
-          fi
+          }
 
-          EXISTING_INSTANCE=$(oci compute instance list \
+          classify_output() {
+            local output="$1"
+            local code
+            code=$(printf '%s' "$output" | jq -r '.code // empty' 2>/dev/null || true)
+            if [ -n "$code" ] && [ "$code" != "null" ]; then
+              case "$code" in
+                LimitExceeded) echo "limit" ;;
+                InternalError) if printf '%s' "$output" | grep -q 'Out of host capacity'; then echo "capacity"; else echo "error"; fi ;;
+                *) echo "error" ;;
+              esac
+              return
+            fi
+
+            if printf '%s' "$output" | jq -e '.data.id' >/dev/null 2>&1; then
+              echo "created"
+              return
+            fi
+
+            if printf '%s' "$output" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+              echo "created"
+              return
+            fi
+
+            if printf '%s' "$output" | grep -qiE 'Out of host capacity|out of capacity'; then
+              echo "capacity"
+              return
+            fi
+
+            if printf '%s' "$output" | grep -qiE 'Too many requests|RequestException|timed out|timeout|connection reset|connection timed out|429'; then
+              echo "retry"
+              return
+            fi
+
+            if printf '%s' "$output" | grep -qiE 'LimitExceeded|service limits|standard-a1-memory-count|standard-a1-core-count'; then
+              echo "limit"
+              return
+            fi
+
+            echo "error"
+          }
+
+          current_a1_count() {
+            oci compute instance list \
+              --compartment-id "$OCI_COMPARTMENT_ID" \
+              --all \
+              | jq -r '[.data[] |
+                  select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING") |
+                  select(.shape == "VM.Standard.A1.Flex")] | length'
+          }
+
+          resolve_subnet
+          resolve_image
+
+          existing_instance=$(oci compute instance list \
             --compartment-id "$OCI_COMPARTMENT_ID" \
             --display-name "$INSTANCE_DISPLAY_NAME" \
             --all 2>/dev/null \
             | jq -r '.data[] | select(."lifecycle-state" != "TERMINATING" and ."lifecycle-state" != "TERMINATED") | .id' \
             | head -n 1 || true)
 
-          if [ -n "$EXISTING_INSTANCE" ] && [ "$EXISTING_INSTANCE" != "null" ]; then
-            OCI_OUTPUT="Instance already running: $EXISTING_INSTANCE"
+          if [ -n "${existing_instance:-}" ] && [ "${existing_instance:-}" != "null" ]; then
+            OCI_OUTPUT="Instance already running: $existing_instance"
             RESULT="already-running"
           else
-            OCI_OUTPUT=$(oci compute instance launch \
-              --compartment-id "$OCI_COMPARTMENT_ID" \
-              --availability-domain "$OCI_AD_NAME" \
-              --shape "VM.Standard.A1.Flex" \
-              --shape-config "{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GBS}}" \
-              --subnet-id "$OCI_SUBNET_ID" \
-              --image-id "$OCI_IMAGE_ID" \
-              --ssh-authorized-keys-file "$HOME/ssh_public_key.pub" \
-              --assign-public-ip true \
-              --display-name "$INSTANCE_DISPLAY_NAME" \
-              --boot-volume-size-in-gbs "$BOOT_VOLUME_GBS" 2>&1 || true)
+            max_instances=$OCI_MAX_INSTANCES
+            if ! [[ "$max_instances" =~ ^[0-9]+$ ]]; then
+              max_instances=1
+            fi
 
-            if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-              RESULT="created"
-            elif echo "$OCI_OUTPUT" | grep -q 'Out of host capacity'; then
-              RESULT="capacity"
-            elif echo "$OCI_OUTPUT" | grep -qiE 'RequestException|timed out|timeout'; then
-              RESULT="retry"
+            current_count=$(current_a1_count)
+            if ! [[ "$current_count" =~ ^[0-9]+$ ]]; then
+              current_count=0
+            fi
+
+            if [ "$current_count" -ge "$max_instances" ] && [ "$max_instances" -gt 0 ]; then
+              RESULT="limit"
+              OCI_OUTPUT="A1 instance limit reached: $current_count (max=$max_instances)."
             else
-              RESULT="error"
+              attempt_summary=""
+              attempt_ad=""
+              RESULT="retry"
+
+              for ad in $(resolve_ad_candidates); do
+                attempt_ad="$ad"
+                attempt_output=$(oci compute instance launch \
+                  --compartment-id "$OCI_COMPARTMENT_ID" \
+                  --availability-domain "$ad" \
+                  --shape "VM.Standard.A1.Flex" \
+                  --shape-config "{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GBS}}" \
+                  --subnet-id "$OCI_SUBNET_ID" \
+                  --image-id "$OCI_IMAGE_ID" \
+                  --ssh-authorized-keys-file "$HOME/ssh_public_key.pub" \
+                  --assign-public-ip true \
+                  --display-name "$INSTANCE_DISPLAY_NAME" \
+                  --boot-volume-size-in-gbs "$BOOT_VOLUME_GBS" 2>&1 || true)
+
+                result_try=$(classify_output "$attempt_output")
+                attempt_summary="${attempt_summary}${ad}:${result_try} "
+
+                if [ "$result_try" = "created" ]; then
+                  RESULT="created"
+                  OCI_OUTPUT=$(printf 'AD=%s\n%s\n' "$ad" "$attempt_output")
+                  break
+                fi
+
+                if [ "$result_try" = "limit" ]; then
+                  RESULT="limit"
+                  OCI_OUTPUT=$(printf 'AD=%s\n%s\n' "$ad" "$attempt_output")
+                  break
+                fi
+
+                if [ "$result_try" = "error" ]; then
+                  RESULT="error"
+                  OCI_OUTPUT=$(printf 'AD=%s\n%s\n' "$ad" "$attempt_output")
+                  break
+                fi
+
+                if [ "$result_try" = "retry" ] || [ "$result_try" = "capacity" ]; then
+                  RESULT="$result_try"
+                  OCI_OUTPUT=$(printf 'AD=%s\n%s\n' "$ad" "$attempt_output")
+                  # continue trying next AD only for retry/capacity
+                fi
+              done
+
+              if [ "$RESULT" != "created" ] && [ "$RESULT" != "error" ] && [ "$RESULT" != "limit" ]; then
+                OCI_OUTPUT=$(printf 'attempts=%s\n%s\n' "$attempt_summary" "$OCI_OUTPUT")
+              fi
             fi
           fi
 
+          # keep old behavior for downstream steps
+          [ -n "${attempt_ad:-}" ] || attempt_ad="${OCI_AD_NAME:-unknown}"
+
           {
             echo "result=$RESULT"
+            echo "attempted_ad=$attempt_ad"
             echo "log_data<<EOF"
             echo "$OCI_OUTPUT"
             echo "EOF"
@@ -157,7 +273,7 @@ jobs:
           echo "$OCI_OUTPUT"
 
           case "$RESULT" in
-            created|capacity|retry|already-running) exit 0 ;;
+            created|capacity|retry|already-running|limit) exit 0 ;;
             *) exit 1 ;;
           esac
 
@@ -166,7 +282,7 @@ jobs:
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ env.DISCORD_WEBHOOK_URL }}
-          color: ${{ steps.create_vm.outputs.result == 'created' && '0x28a745' || steps.create_vm.outputs.result == 'capacity' && '0xffa500' || '0xdc3545' }}
+          color: ${{ steps.create_vm.outputs.result == 'created' && '0x28a745' || (steps.create_vm.outputs.result == 'capacity' || steps.create_vm.outputs.result == 'limit') && '0xffa500' || '0xdc3545' }}
           title: OCI A1 VM Bot
           description: |
             Result: `${{ steps.create_vm.outputs.result }}`

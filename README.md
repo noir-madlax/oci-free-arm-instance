@@ -9,10 +9,10 @@ This is necessary because the "Always Free" Arm instances are a popular resource
 ## Features
 
 * **Fully Automated:** Runs entirely within GitHub Actions. You don't need to run anything on your local machine.
-* **Persistent:** The workflow runs on a 10-minute schedule, continuously retrying until it successfully provisions your VM.
+* **Persistent:** The workflow runs on an 8-minute schedule, continuously retrying until it successfully provisions your VM.
 * **Secure:** All sensitive credentials, keys, and IDs are stored in encrypted GitHub Secrets. The repository itself contains no private information and is safe to be public.
 * **Fast:** Uses GitHub's caching to store the `oci-cli` installation, so subsequent runs are much faster.
-* **Informative:** Sends detailed notifications to a Discord channel on every attempt, showing the full success or error log (e.g., "Out of host capacity").
+* **Informative:** Sends detailed notifications to a Discord channel on every attempt, showing the full success or error log (for example, `Out of host capacity`, `LimitExceeded`, `RequestException`).
 
 ---
 
@@ -34,7 +34,7 @@ Click the **"Fork"** button at the top-right of this page. This will create a co
 
 ## Step 2: Generate Your OCI API Credentials
 
-This is the most detailed step. You need to gather **11 pieces of information** from your OCI account and your computer.
+This is the most detailed step. You need to gather the required information below (with two optional settings for retries and limits).
 
 ### A. Core IDs (Tenancy, User, Region)
 
@@ -63,27 +63,28 @@ This is the most detailed step. You need to gather **11 pieces of information** 
     * Click on your VCN (there is likely one default VCN).
     * Click on **"Subnets"** in the left menu.
     * Click on your public subnet (e.g., `Public Subnet ...`).
-    * Copy the **OCID** of the subnet. This is your `SUBNET_ID`.
-2.  **Availability Domain (AD) Name:**
+    * Copy the **OCID** of the subnet. This is your `OCI_SUBNET_ID`.
+2.  **Availability Domain (AD) Name (Optional):**
     * Go to the OCI Console menu (☰) -> **Compute** -> **Instances**.
     * Click **"Create Instance"**.
     * In the **"Placement"** section, look at the **"Availability Domain"** dropdown. You likely only have one.
-    * Copy its name *exactly* as it appears (e.g., `KClJ:AP-SINGAPORE-1-AD-1`). This is your `AD_NAME`.
+    * Copy its name *exactly* as it appears (e.g., `KClJ:AP-SINGAPORE-1-AD-1`). This is your `OCI_AD_NAME`.
+    * You can leave it blank to auto-discover and try all ADs in the tenancy.
 3.  **Image ID:**
     * On the same "Create Instance" page, in the **"Image and shape"** section, click **"Change Image"**.
     * Select **"Canonical Ubuntu"** (or another OS of your choice).
     * Click the name of the image (e.g., "Canonical Ubuntu 22.04"). A details panel will slide out.
-    * Copy the **OCID** of the image. This is your `IMAGE_ID`.
+    * Copy the **OCID** of the image. This is your `OCI_IMAGE_ID`.
     * You can now cancel the "Create Instance" wizard.
     * If you still can not find the image, check this website and choose your image and copy ocid mentioned according to region. <https://docs.oracle.com/en-us/iaas/images/>
-    * set this `IMAGE_ID` in your action env.
+    * set this `OCI_IMAGE_ID` in your action env.
 4.  **OCPUs and RAM**
-    * The default settings in this action is to provision instance with 2 OCPUs and 12 GB memory.
-    * you can change this in action line 59 `--shape-config '{"ocpus":2,"memoryInGBs":12}' \`
+    * The default settings in this action is to provision instance with 4 OCPUs and 24 GB memory.
+    * you can change this in action line 59 `--shape-config '{"ocpus":4,"memoryInGBs":24}' \`
 6. **Boot Volume and Name**
-    * The default settings in this action is to provision instance with `100`GB boot volume with name `coolify-vm`.
-    * you can change bootvolume in action line 65 `--boot-volume-size-in-gbs 100' \`
-    * you can change instance name in same command (action line 64) `--display-name "coolify-vm"`
+    * The default settings in this action is to provision instance with `50`GB boot volume with name `oci-free-a1`.
+    * you can change boot volume in action line 65 `--boot-volume-size-in-gbs 50' \`
+    * you can change instance name in same command (action line 64) `--display-name "oci-free-a1"`
    
 ### D. Your SSH Public Key
 
@@ -96,12 +97,18 @@ This is the key you will use to log in to your new server.
 
 ---
 
-## Step 3: Create a Discord Webhook
+## Step 3: Create a Discord Webhook (Optional)
 
 1.  Open your Discord server. Right-click on a channel name and click **"Edit Channel"**.
 2.  Go to the **"Integrations"** tab.
 3.  Click **"Webhooks"** -> **"New Webhook"**.
 4.  Give it a name (e.g., "OCI Notifier") and click **"Copy Webhook URL"**.
+
+## Optional Step 3.1: Create a Feishu Bot Webhook
+
+1.  在飞书开放平台创建机器人/自定义机器人并获取「Incoming Webhook URL」。
+2.  保存为仓库 Secret: `FEISHU_WEBHOOK_URL`。
+3.  新增的监控工作流会在首次检测到实例创建成功时，向该地址推送 10 条告警。
 
 ---
 
@@ -111,15 +118,16 @@ Go to your forked repository on GitHub.
 
 1.  Click the **"Settings"** tab.
 2.  In the left menu, click **"Secrets and variables"** -> **"Actions"**.
-3.  Click the **"New repository secret"** button for *each* of the 11 secrets listed below.
+3.  Click the **"New repository secret"** button for the required secrets listed below.
 
 #### **VM Secrets**
 
 * `OCI_COMPARTMENT_ID` (Value: Your Tenancy OCID from Step 2A)
-* `IMAGE_ID` (Value: Your Image OCID from Step 2C)
+* `OCI_IMAGE_ID` (Value: Your Image OCID from Step 2C)
 * `OCI_SUBNET_ID` (Value: Your Subnet OCID from Step 2C)
-* `AD_NAME` (Value: Your Availability Domain name from Step 2C)
+* `OCI_AD_NAME` (Optional: Availability Domain name from Step 2C)
 * `SSH_PUBLIC_KEY` (Value: The `ssh-rsa...` key from Step 2D)
+* `OCI_MAX_INSTANCES` (Optional: maximum allowed A1 instances to keep; default `1`)
 
 #### **Authentication Secrets**
 
@@ -132,6 +140,7 @@ Go to your forked repository on GitHub.
 #### **Notification Secret**
 
 * `DISCORD_WEBHOOK_URL` (Value: The URL you copied from Discord in Step 3)
+* `FEISHU_WEBHOOK_URL` (Value: The URL you copied from Feishu in Optional Step 3.1)
 
 ---
 
@@ -143,7 +152,7 @@ You're all set! Now you just need to start the process.
 2.  In the left sidebar, click on **"Try to Create OCI VM"**.
 3.  You will see a message: "This workflow has a `workflow_dispatch` event." Click the **"Run workflow"** button on the right, and then **"Run workflow"** again.
 
-This will start the first run. From now on, the `schedule` will automatically run it every 10 minutes. You can check the "Actions" tab to see the logs from each run. You will also get a notification in Discord every time it tries.
+This will start the first run. From now on, the `schedule` will automatically run it every 8 minutes. You can check the "Actions" tab to see the logs from each run. You will also get a notification in Discord every time it tries.
 
 ---
 
@@ -158,7 +167,7 @@ As soon as you see this, you **MUST** disable the workflow.
 3.  Click the **three-dot (...)** menu on the right.
 4.  Click **"Disable workflow"**.
 
-If you do not do this, the action will continue running every 10 minutes and will try to create *another* VM, which will just fill your logs with errors.
+If you do not do this, the action will continue running every 8 minutes and will continue retrying until it is disabled or succeeds.
 
 Your VM will be provisioning in the OCI console. You can now log in using the SSH key you provided.
 
