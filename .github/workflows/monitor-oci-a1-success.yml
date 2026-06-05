@@ -27,6 +27,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          WORKFLOW_NAME="Try to Create OCI A1 VM"
+          WORKFLOW_ID=""
+
           mkdir -p .github/oci-monitor-state
           STATE_FILE=".github/oci-monitor-state/last_notified_run_id"
           PREV_REPORTED=""
@@ -36,11 +39,33 @@ jobs:
 
           LATEST_RUN_JSON=$(gh run list \
             --repo "$TARGET_REPO" \
-            --workflow "Try to Create OCI A1 VM" \
+            --workflow "$WORKFLOW_NAME" \
             --status completed \
             --limit 1 \
             --json databaseId,createdAt,status,conclusion,url \
             --jq '.[0]' 2>/dev/null)
+          if [ -z "$LATEST_RUN_JSON" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
+            WORKFLOW_ID=$(gh api "repos/$TARGET_REPO/actions/workflows" \
+              --jq "[.workflows[] | select(.name == \"$WORKFLOW_NAME\") | .id][0]" 2>/dev/null || true)
+            if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
+              LATEST_RUN_JSON=$(gh run list \
+                --repo "$TARGET_REPO" \
+                --workflow "$WORKFLOW_ID" \
+                --status completed \
+                --limit 1 \
+                --json databaseId,createdAt,status,conclusion,url \
+                --jq '.[0]' 2>/dev/null || echo "")
+            fi
+          fi
+          if [ -z "$LATEST_RUN_JSON" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
+            LATEST_RUN_JSON=$(gh run list \
+              --repo "$TARGET_REPO" \
+              --status completed \
+              --limit 40 \
+              --json databaseId,createdAt,status,conclusion,url,name \
+              --jq "map(select(.name == \"$WORKFLOW_NAME\"))[0]" 2>/dev/null || echo "")
+          fi
+
           LATEST_RUN_ID=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.databaseId // empty')
           LATEST_RUN_URL=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.url // empty')
           LATEST_RUN_CREATED=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.createdAt // empty')
