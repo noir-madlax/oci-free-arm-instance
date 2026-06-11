@@ -99,13 +99,18 @@ jobs:
             PREV_REPORTED="$(cat "$STATE_FILE")"
           fi
 
-          LATEST_RUN_JSON=$(run_with_retry gh run list \
-            --repo "$TARGET_REPO" \
-            --workflow "$WORKFLOW_FILE" \
-            --status completed \
-            --limit 1 \
-            --json databaseId,createdAt,status,conclusion,url \
-            --jq '.[0]' 2>/dev/null || true)
+          WORKFLOW_ID=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows/$WORKFLOW_FILE" --jq '.id // empty' 2>/dev/null || true)
+
+          if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
+            LATEST_RUN_JSON=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows/$WORKFLOW_ID/runs?status=completed&per_page=1" --jq '{
+              databaseId: .workflow_runs[0].id // empty,
+              createdAt: .workflow_runs[0].created_at // empty,
+              status: .workflow_runs[0].status // empty,
+              conclusion: .workflow_runs[0].conclusion // empty,
+              url: .workflow_runs[0].url // empty,
+              name: .workflow_runs[0].name // empty
+            }' 2>/dev/null || true)
+          fi
 
           if [ -z "${LATEST_RUN_JSON:-}" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
             LATEST_RUN_JSON=$(run_with_retry gh run list \
@@ -133,13 +138,14 @@ jobs:
             fi
 
             if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
-              LATEST_RUN_JSON=$(run_with_retry gh run list \
-                --repo "$TARGET_REPO" \
-                --workflow "$WORKFLOW_ID" \
-                --status completed \
-                --limit 1 \
-                --json databaseId,createdAt,status,conclusion,url \
-                --jq '.[0]' 2>/dev/null || true)
+              LATEST_RUN_JSON=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows/$WORKFLOW_ID/runs?status=completed&per_page=1" --jq '{
+                databaseId: .workflow_runs[0].id // empty,
+                createdAt: .workflow_runs[0].created_at // empty,
+                status: .workflow_runs[0].status // empty,
+                conclusion: .workflow_runs[0].conclusion // empty,
+                url: .workflow_runs[0].url // empty,
+                name: .workflow_runs[0].name // empty
+              }' 2>/dev/null || true)
             fi
           fi
 
