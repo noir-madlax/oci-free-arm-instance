@@ -92,6 +92,20 @@ jobs:
             return 1
           }
 
+          log_lookup_result() {
+            local mode="$1"
+            local payload="$2"
+
+            if [ -n "$payload" ] && [ "$payload" != "null" ]; then
+              LOOKUP_MODE="$mode"
+              echo "Lookup mode=$mode => hit"
+            else
+              echo "Lookup mode=$mode => no match"
+            fi
+          }
+
+          LOOKUP_MODE="unset"
+
           mkdir -p .github/oci-monitor-state
           STATE_FILE=".github/oci-monitor-state/last_notified_run_id"
           PREV_REPORTED=""
@@ -99,12 +113,33 @@ jobs:
             PREV_REPORTED="$(cat "$STATE_FILE")"
           fi
 
-          LATEST_RUN_JSON=$(run_with_retry gh api "repos/$TARGET_REPO/actions/runs?status=completed&per_page=100" \
-            --jq ".workflow_runs | map(select(.name == \"$WORKFLOW_NAME\"))[0]" 2>/dev/null || true)
+          echo "Workflow check target: name='$WORKFLOW_NAME', file='$WORKFLOW_FILE'"
+
+          WORKFLOW_ID=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows/$WORKFLOW_FILE" --jq ".id // empty" 2>/dev/null || true)
+          if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
+            echo "Resolved workflow id from file: $WORKFLOW_ID"
+          else
+            echo "Could not resolve workflow id by file; fallback to workflow list by name."
+            WORKFLOW_ID=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows" \
+              --jq "[.workflows[] | select(.name == \"$WORKFLOW_NAME\") | .id][0]" 2>/dev/null || true)
+          fi
+
+          if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
+            LATEST_RUN_JSON=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows/$WORKFLOW_ID/runs?status=completed&per_page=1" \
+              --jq "{ id: .workflow_runs[0].id // empty, databaseId: .workflow_runs[0].id // empty, created_at: .workflow_runs[0].created_at // empty, createdAt: .workflow_runs[0].created_at // empty, status: .workflow_runs[0].status // empty, conclusion: .workflow_runs[0].conclusion // empty, url: .workflow_runs[0].url // empty, name: .workflow_runs[0].name // empty }" 2>/dev/null || true)
+            log_lookup_result "workflow_runs_by_id" "$LATEST_RUN_JSON"
+          fi
+
+          if [ -z "${LATEST_RUN_JSON:-}" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
+            LATEST_RUN_JSON=$(run_with_retry gh api "repos/$TARGET_REPO/actions/runs?status=completed&per_page=100" \
+              --jq ".workflow_runs | map(select(.name == \"$WORKFLOW_NAME\"))[0]" 2>/dev/null || true)
+            log_lookup_result "actions_runs_name_filter" "$LATEST_RUN_JSON"
+          fi
 
           if [ -z "${LATEST_RUN_JSON:-}" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
             LATEST_RUN_JSON=$(run_with_retry gh api "repos/$TARGET_REPO/actions/runs?status=completed&per_page=100" \
               --jq ".workflow_runs | map(select(.path == \".github/workflows/$WORKFLOW_FILE\"))[0]" 2>/dev/null || true)
+            log_lookup_result "actions_runs_path_filter" "$LATEST_RUN_JSON"
           fi
 
           if [ -z "${LATEST_RUN_JSON:-}" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
@@ -114,32 +149,18 @@ jobs:
               --limit 40 \
               --json databaseId,createdAt,status,conclusion,url,name \
               --jq "map(select(.name == \"$WORKFLOW_NAME\"))[0]" 2>/dev/null || true)
-          fi
-
-          if [ -z "${LATEST_RUN_JSON:-}" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
-            if [ -z "$WORKFLOW_ID" ] || [ "$WORKFLOW_ID" = "null" ]; then
-              WORKFLOW_ID=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows" \
-                --jq "[.workflows[] | select(.name == \"$WORKFLOW_NAME\") | .id][0]" 2>/dev/null || true)
-            fi
-
-            if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
-              LATEST_RUN_JSON=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows/$WORKFLOW_ID/runs?status=completed&per_page=1" \
-                --jq "{
-                  databaseId: .workflow_runs[0].id // empty,
-                  createdAt: .workflow_runs[0].created_at // empty,
-                  status: .workflow_runs[0].status // empty,
-                  conclusion: .workflow_runs[0].conclusion // empty,
-                  url: .workflow_runs[0].url // empty,
-                  name: .workflow_runs[0].name // empty
-                }" 2>/dev/null || true)
-            fi
+            log_lookup_result "run_list_name_filter" "$LATEST_RUN_JSON"
           fi
 
           LATEST_RUN_ID=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.id // .databaseId // empty')
           LATEST_RUN_URL=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.url // empty')
           LATEST_RUN_CREATED=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.created_at // .createdAt // empty')
+          LATEST_RUN_STATUS=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.status // empty')
+          LATEST_RUN_CONCLUSION=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.conclusion // empty')
+          LATEST_RUN_NAME=$(printf '%s' "$LATEST_RUN_JSON" | jq -r '.name // empty')
+          echo "Resolved run summary: id=$LATEST_RUN_ID status=$LATEST_RUN_STATUS conclusion=$LATEST_RUN_CONCLUSION name=$LATEST_RUN_NAME lookup=$LOOKUP_MODE created_at=$LATEST_RUN_CREATED url=${LATEST_RUN_URL:-}"
           if [ -z "$LATEST_RUN_ID" ] || [ "$LATEST_RUN_ID" = "null" ]; then
-            echo "No completed run found for workflow."
+            echo "No completed run found for workflow. LOOKUP_MODE=$LOOKUP_MODE, workflow_name=$WORKFLOW_NAME, workflow_file=$WORKFLOW_FILE, workflow_id=$WORKFLOW_ID"
             echo "should_notify=false" >> "$GITHUB_OUTPUT"
             echo "run_id=unknown" >> "$GITHUB_OUTPUT"
             echo "result=unknown" >> "$GITHUB_OUTPUT"
