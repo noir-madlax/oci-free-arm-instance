@@ -99,17 +99,13 @@ jobs:
             PREV_REPORTED="$(cat "$STATE_FILE")"
           fi
 
-          WORKFLOW_ID=$(run_with_retry gh api "repos/$TARGET_REPO/actions/workflows/$WORKFLOW_FILE" --jq '.id // empty' 2>/dev/null || true)
-
-          if [ -n "$WORKFLOW_ID" ] && [ "$WORKFLOW_ID" != "null" ]; then
-            LATEST_RUN_JSON=$(run_with_retry gh run list \
-              --repo "$TARGET_REPO" \
-              --workflow "$WORKFLOW_ID" \
-              --status completed \
-              --limit 1 \
-              --json databaseId,createdAt,status,conclusion,url \
-              --jq '.[0]' 2>/dev/null || true)
-          fi
+          LATEST_RUN_JSON=$(run_with_retry gh run list \
+            --repo "$TARGET_REPO" \
+            --workflow "$WORKFLOW_FILE" \
+            --status completed \
+            --limit 1 \
+            --json databaseId,createdAt,status,conclusion,url \
+            --jq '.[0]' 2>/dev/null || true)
 
           if [ -z "${LATEST_RUN_JSON:-}" ] || [ "$LATEST_RUN_JSON" = "null" ]; then
             LATEST_RUN_JSON=$(run_with_retry gh run list \
