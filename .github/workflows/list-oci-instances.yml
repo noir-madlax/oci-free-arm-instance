@@ -64,6 +64,13 @@ jobs:
             echo "OCI_CLI_STDERR_END"
           fi
 
+          if [ ! -s instances.json ]; then
+            echo "OCI_RESPONSE_FORMAT=empty"
+            echo "NON_TERMINATED_INSTANCE_COUNT=0"
+            echo "NO_NON_TERMINATED_INSTANCES"
+            exit 0
+          fi
+
           source_format=$(jq -r '
             if type == "object" and (.data | type == "array") then "object_data_array"
             elif type == "array" then "top_level_array"
