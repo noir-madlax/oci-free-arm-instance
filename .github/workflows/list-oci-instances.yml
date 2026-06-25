@@ -64,9 +64,22 @@ jobs:
             echo "OCI_CLI_STDERR_END"
           fi
 
-          jq -e '.data | type == "array"' instances.json >/dev/null
+          source_format=$(jq -r '
+            if type == "object" and (.data | type == "array") then "object_data_array"
+            elif type == "array" then "top_level_array"
+            else "unsupported"
+            end
+          ' instances.json)
+          echo "OCI_RESPONSE_FORMAT=$source_format"
 
-          count=$(jq '[.data[] |
+          if [ "$source_format" = "unsupported" ]; then
+            echo "UNSUPPORTED_OCI_RESPONSE"
+            jq -r 'type as $type | "top_level_type=\($type)", (if $type == "object" then "keys=\(keys | join(","))" else empty end)' instances.json
+            exit 1
+          fi
+
+          count=$(jq '[
+            (if type == "object" then .data else . end)[] |
             select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING")] | length' instances.json)
           echo "NON_TERMINATED_INSTANCE_COUNT=$count"
 
@@ -77,7 +90,7 @@ jobs:
 
           jq -r '
             ["display_name", "shape", "state", "availability_domain", "time_created"],
-            (.data[] |
+            ((if type == "object" then .data else . end)[] |
               select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING") |
               [
               ."display-name",
