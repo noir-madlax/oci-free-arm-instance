@@ -10,6 +10,7 @@ env:
   OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
   OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
   OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  PYTHONWARNINGS: "ignore::FutureWarning"
 
 jobs:
   list-instances:
@@ -50,14 +51,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          instances_json=$(oci compute instance list \
+          oci compute instance list \
             --compartment-id "$OCI_COMPARTMENT_ID" \
-            --all)
+            --all \
+            --output json \
+            > instances.json \
+            2> oci-stderr.log
 
-          active_instances=$(printf '%s' "$instances_json" | jq '[.data[] |
-            select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING")]')
+          if [ -s oci-stderr.log ]; then
+            echo "OCI_CLI_STDERR_BEGIN"
+            sed -E 's/ocid1\.[[:alnum:]._-]+/***OCID_MASKED***/g' oci-stderr.log
+            echo "OCI_CLI_STDERR_END"
+          fi
 
-          count=$(printf '%s' "$active_instances" | jq 'length')
+          jq -e '.data | type == "array"' instances.json >/dev/null
+
+          count=$(jq '[.data[] |
+            select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING")] | length' instances.json)
           echo "NON_TERMINATED_INSTANCE_COUNT=$count"
 
           if [ "$count" -eq 0 ]; then
@@ -65,9 +75,11 @@ jobs:
             exit 0
           fi
 
-          printf '%s' "$active_instances" | jq -r '
+          jq -r '
             ["display_name", "shape", "state", "availability_domain", "time_created"],
-            (.[] | [
+            (.data[] |
+              select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING") |
+              [
               ."display-name",
               .shape,
               ."lifecycle-state",
@@ -75,4 +87,4 @@ jobs:
               ."time-created"
             ])
             | @tsv
-          '
+          ' instances.json
