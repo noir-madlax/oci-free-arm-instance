@@ -8,11 +8,11 @@ on:
       ocpus:
         description: "A1.Flex OCPUs"
         required: true
-        default: "4"
+        default: "2"
       memory_gbs:
         description: "A1.Flex memory in GB"
         required: true
-        default: "24"
+        default: "12"
       boot_volume_gbs:
         description: "Boot volume size in GB"
         required: true
@@ -36,8 +36,8 @@ env:
   OCI_MAX_INSTANCES: ${{ secrets.OCI_MAX_INSTANCES || '1' }}
   DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
   INSTANCE_DISPLAY_NAME: ${{ github.event.inputs.display_name || 'oci-free-a1' }}
-  OCPUS: ${{ github.event.inputs.ocpus || '4' }}
-  MEMORY_GBS: ${{ github.event.inputs.memory_gbs || '24' }}
+  OCPUS: ${{ github.event.inputs.ocpus || '2' }}
+  MEMORY_GBS: ${{ github.event.inputs.memory_gbs || '12' }}
   BOOT_VOLUME_GBS: ${{ github.event.inputs.boot_volume_gbs || '50' }}
 
 jobs:
