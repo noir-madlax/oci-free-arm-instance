@@ -95,16 +95,24 @@ jobs:
             exit 0
           fi
 
-          jq -r '
-            ["display_name", "shape", "state", "availability_domain", "time_created"],
-            ((if type == "object" then .data else . end)[] |
-              select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING") |
-              [
-              ."display-name",
-              .shape,
-              ."lifecycle-state",
-              ."availability-domain",
-              ."time-created"
-            ])
-            | @tsv
-          ' instances.json
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "display_name" "shape" "state" "public_ip" "private_ip" "availability_domain" "time_created"
+
+          jq -c '
+            (if type == "object" then .data else . end)[] |
+            select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING")
+          ' instances.json | while IFS= read -r instance; do
+            instance_id=$(printf '%s' "$instance" | jq -r '.id')
+            vnic_json=$(oci compute instance list-vnics --instance-id "$instance_id" --output json)
+            public_ip=$(printf '%s' "$vnic_json" | jq -r '(.data // .)[0]."public-ip" // ""')
+            private_ip=$(printf '%s' "$vnic_json" | jq -r '(.data // .)[0]."private-ip" // ""')
+
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$(printf '%s' "$instance" | jq -r '."display-name"')" \
+              "$(printf '%s' "$instance" | jq -r '.shape')" \
+              "$(printf '%s' "$instance" | jq -r '."lifecycle-state"')" \
+              "$public_ip" \
+              "$private_ip" \
+              "$(printf '%s' "$instance" | jq -r '."availability-domain"')" \
+              "$(printf '%s' "$instance" | jq -r '."time-created"')"
+          done
