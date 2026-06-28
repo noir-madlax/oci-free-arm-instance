@@ -1,0 +1,126 @@
+name: Backup OCI Boot Volume
+
+on:
+  workflow_dispatch:
+    inputs:
+      display_name:
+        description: "Instance display name"
+        required: true
+        default: "oci-free-a1"
+      backup_type:
+        description: "Boot volume backup type: FULL or INCREMENTAL"
+        required: true
+        default: "FULL"
+
+permissions:
+  contents: read
+
+env:
+  OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
+  OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+  OCI_COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
+  INSTANCE_DISPLAY_NAME: ${{ github.event.inputs.display_name || 'oci-free-a1' }}
+  BACKUP_TYPE: ${{ github.event.inputs.backup_type || 'FULL' }}
+  PYTHONWARNINGS: "ignore::FutureWarning"
+
+jobs:
+  backup-boot-volume:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache OCI CLI install
+        uses: actions/cache@v4
+        with:
+          path: ~/.local
+          key: ${{ runner.os }}-oci-cli-v2
+
+      - name: Add user bin to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install OCI CLI
+        run: |
+          python -m pip install --upgrade pip
+          pip install --user oci-cli
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p "$HOME/.oci"
+          printf '%s\n' "${{ secrets.OCI_CLI_KEY_CONTENT }}" > "$HOME/.oci/oci_api_key.pem"
+          chmod 600 "$HOME/.oci/oci_api_key.pem"
+
+          cat > "$HOME/.oci/config" <<EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_CLI_USER }}
+          tenancy=${{ secrets.OCI_CLI_TENANCY }}
+          fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}
+          key_file=$HOME/.oci/oci_api_key.pem
+          region=${{ secrets.OCI_CLI_REGION }}
+          EOF
+          chmod 600 "$HOME/.oci/config"
+
+      - name: Create boot volume backup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "$BACKUP_TYPE" in
+            FULL|INCREMENTAL) ;;
+            *) echo "Invalid BACKUP_TYPE=$BACKUP_TYPE"; exit 1 ;;
+          esac
+
+          instances_json=$(oci compute instance list \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --display-name "$INSTANCE_DISPLAY_NAME" \
+            --all \
+            --output json)
+
+          instance_json=$(printf '%s' "$instances_json" | jq -c '
+            .data[] |
+            select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING")
+          ' | head -n 1)
+
+          if [ -z "$instance_json" ]; then
+            echo "No non-terminated instance found for display name: $INSTANCE_DISPLAY_NAME"
+            exit 1
+          fi
+
+          instance_id=$(printf '%s' "$instance_json" | jq -r '.id')
+          availability_domain=$(printf '%s' "$instance_json" | jq -r '."availability-domain"')
+          state=$(printf '%s' "$instance_json" | jq -r '."lifecycle-state"')
+          shape=$(printf '%s' "$instance_json" | jq -r '.shape')
+
+          echo "INSTANCE_DISPLAY_NAME=$INSTANCE_DISPLAY_NAME"
+          echo "INSTANCE_STATE=$state"
+          echo "INSTANCE_SHAPE=$shape"
+          echo "INSTANCE_ID=$instance_id"
+          echo "AVAILABILITY_DOMAIN=$availability_domain"
+
+          attachments_json=$(oci compute boot-volume-attachment list \
+            --compartment-id "$OCI_COMPARTMENT_ID" \
+            --availability-domain "$availability_domain" \
+            --instance-id "$instance_id" \
+            --all \
+            --output json)
+
+          boot_volume_id=$(printf '%s' "$attachments_json" | jq -r '.data[0]."boot-volume-id" // empty')
+          if [ -z "$boot_volume_id" ]; then
+            echo "No boot volume attachment found for instance: $instance_id"
+            exit 1
+          fi
+
+          backup_name="${INSTANCE_DISPLAY_NAME}-boot-$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "BOOT_VOLUME_ID=$boot_volume_id"
+          echo "BACKUP_NAME=$backup_name"
+          echo "BACKUP_TYPE=$BACKUP_TYPE"
+
+          backup_json=$(oci bv boot-volume-backup create \
+            --boot-volume-id "$boot_volume_id" \
+            --display-name "$backup_name" \
+            --type "$BACKUP_TYPE" \
+            --wait-for-state AVAILABLE \
+            --wait-interval-seconds 30 \
+            --max-wait-seconds 3600 \
+            --output json)
+
+          echo "BOOT_VOLUME_BACKUP_ID=$(printf '%s' "$backup_json" | jq -r '.data.id')"
+          echo "BOOT_VOLUME_BACKUP_STATE=$(printf '%s' "$backup_json" | jq -r '.data."lifecycle-state"')"
+          echo "BOOT_VOLUME_BACKUP_DISPLAY_NAME=$(printf '%s' "$backup_json" | jq -r '.data."display-name"')"
